@@ -475,39 +475,61 @@ static void query_rak12035(uint8_t ch, uint8_t sub_ch, CayenneLPP& lpp) {
 }
 #endif
 
-  return true;
+#if ENV_INCLUDE_BME680_BSEC
+static void bsec_load_state() {
+  using namespace Adafruit_LittleFS_Namespace;
+  File f = InternalFS.open(BSEC_STATE_FILE, FILE_O_READ);
+  if (!f) return;
+  uint8_t state[BSEC_MAX_STATE_BLOB_SIZE];
+  f.read(state, BSEC_MAX_STATE_BLOB_SIZE);
+  f.close();
+  bsec_iaq.setState(state);
 }
 
-bool EnvironmentSensorManager::querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) {
-  next_available_channel = TELEM_CHANNEL_SELF + 1;
+static void bsec_save_state() {
+  using namespace Adafruit_LittleFS_Namespace;
+  uint8_t state[BSEC_MAX_STATE_BLOB_SIZE];
+  bsec_iaq.getState(state);
+  InternalFS.remove(BSEC_STATE_FILE);
+  File f = InternalFS.open(BSEC_STATE_FILE, FILE_O_WRITE);
+  if (!f) return;
+  f.write(state, BSEC_MAX_STATE_BLOB_SIZE);
+  f.close();
+}
 
-  if (requester_permissions & TELEM_PERM_LOCATION && gps_active) {
-    telemetry.addGPS(TELEM_CHANNEL_SELF, node_lat, node_lon, node_altitude); // allow lat/lon via telemetry even if no GPS is detected
-  }
+static uint8_t init_bme680_bsec(TwoWire* wire, uint8_t addr) {
+  bsec_iaq.begin(addr, *wire);
+  if (bsec_iaq.bsecStatus != BSEC_OK) return 0;
 
-  if (requester_permissions & TELEM_PERM_ENVIRONMENT) {
+  bsec_iaq.setConfig(bsec_config_iaq);
+  if (bsec_iaq.bsecStatus != BSEC_OK) return 0;
 
-    #if ENV_INCLUDE_AHTX0
-    if (AHTX0_initialized) {
-      sensors_event_t humidity, temp;
-      AHTX0.getEvent(&humidity, &temp);
-      telemetry.addTemperature(TELEM_CHANNEL_SELF, temp.temperature);
-      telemetry.addRelativeHumidity(TELEM_CHANNEL_SELF, humidity.relative_humidity);
-    }
-    #endif
+  bsec_virtual_sensor_t outputs[] = {
+    BSEC_OUTPUT_IAQ,
+    BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,
+    BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY,
+    BSEC_OUTPUT_RAW_PRESSURE,
+    BSEC_OUTPUT_STABILIZATION_STATUS,
+    BSEC_OUTPUT_RUN_IN_STATUS,
+  };
+  bsec_iaq.updateSubscription(outputs, 6, BSEC_SAMPLE_RATE_LP);
+  if (bsec_iaq.bsecStatus != BSEC_OK) return 0;
 
-    #if ENV_INCLUDE_BME680
-    if (BME680_initialized) {
-      if (BME680.performReading()) {
-        telemetry.addTemperature(TELEM_CHANNEL_SELF, BME680.temperature);
-        telemetry.addRelativeHumidity(TELEM_CHANNEL_SELF, BME680.humidity);
-        telemetry.addBarometricPressure(TELEM_CHANNEL_SELF, BME680.pressure / 100);
-        telemetry.addAltitude(TELEM_CHANNEL_SELF, 44330.0 * (1.0 - pow((BME680.pressure / 100) / TELEM_BME680_SEALEVELPRESSURE_HPA, 0.1903)));
-        telemetry.addAnalogInput(next_available_channel, BME680.gas_resistance);
-        next_available_channel++;
-      }
-    }
-    #endif
+  bsec_load_state();
+  bsec_active = true;
+  return 1;
+}
+
+static void query_bme680_bsec(uint8_t ch, uint8_t, CayenneLPP& lpp) {
+  if (!bsec_data_ready) return;
+  lpp.addTemperature(ch, bsec_temperature);
+  lpp.addRelativeHumidity(ch, bsec_humidity);
+  lpp.addBarometricPressure(ch, bsec_pressure_hpa);
+  lpp.addAltitude(ch, 44330.0f * (1.0f - powf(bsec_pressure_hpa / (float)TELEM_BME680_SEALEVELPRESSURE_HPA, 0.1903f)));
+  lpp.addGenericSensor(ch, (uint16_t)bsec_iaq_val);
+  lpp.addAnalogInput(ch, (float)bsec_accuracy);
+}
+#endif
 
 // ============================================================
 // Sensor descriptor table
