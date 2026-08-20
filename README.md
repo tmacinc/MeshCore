@@ -22,7 +22,7 @@ MeshCore provides the ability to create wireless mesh networks, similar to Mesht
 
 ## 🏷️ Team Edition
 
-This branch (`main`) is the **MeshCore Team Edition** — a custom firmware build layered on top of stock MeshCore. It adds team-oriented features for GPS tracking, smart forwarding control, and unattended autonomous operation. The firmware version is suffixed with a Team build number (e.g. `v1.15.0.5`).
+This branch (`main`) is the **MeshCore Team Edition** — a custom firmware build layered on top of stock MeshCore. It adds team-oriented features for GPS tracking, smart forwarding control, and unattended autonomous operation. The firmware version is the upstream version suffixed with a Team build number — currently `v1.17.1.4` (`FIRMWARE_VERSION` + `TEAM_VERSION`, both in [`MyMesh.h`](./examples/companion_radio/MyMesh.h)).
 
 ### ✨ Team Edition Features
 
@@ -32,8 +32,10 @@ The companion radio firmware can now have its forwarding behaviour controlled dy
 
 | Command | Code | Description |
 |---|---|---|
-| `CMD_SET_MAX_HOPS` | `73` | Set the maximum flood hop count (`flood_max`). `0` disables forwarding. |
-| `CMD_SET_FORWARD_LIST` | `74` | Push a whitelist of up to 20 contact public-key prefixes (6 bytes each). Only messages from these contacts are forwarded. |
+| `CMD_SET_MAX_HOPS` | `201` | Set the maximum flood hop count (`flood_max`). `0` disables forwarding. |
+| `CMD_SET_FORWARD_LIST` | `202` | Push a whitelist of up to 20 contact public-key prefixes (6 bytes each). Only messages from these contacts are forwarded. |
+
+> All Team Edition protocol constants live in [`team_protocol.h`](./examples/companion_radio/team_protocol.h) and use the `200-254` range so they never collide with upstream stock codes (currently maxing out at `CMD 65` / `RESP 28` / `PUSH 0x90`).
 
 **Forwarding policy rules:**
 - **Public channel messages are always blocked** from being forwarded, preventing channel spam.
@@ -54,8 +56,10 @@ Autonomous mode allows a GPS-equipped companion radio to operate as a **standalo
 
 | Command | Code | Description |
 |---|---|---|
-| `CMD_GET_AUTONOMOUS_SETTINGS` | `75` | Read the currently persisted autonomous tracker settings. |
-| `CMD_SET_AUTONOMOUS_SETTINGS` | `76` | Write autonomous tracker settings. Requires a GPS unit to be present. |
+| `CMD_GET_AUTONOMOUS_SETTINGS` | `203` | Read the currently persisted autonomous tracker settings. |
+| `CMD_SET_AUTONOMOUS_SETTINGS` | `204` | Write autonomous tracker settings. Requires a GPS unit to be present. |
+
+The reply to `CMD_GET_AUTONOMOUS_SETTINGS` is `RESP_CODE_AUTONOMOUS_SETTINGS` (`200`).
 
 **Settings:**
 
@@ -70,7 +74,7 @@ Autonomous mode allows a GPS-equipped companion radio to operate as a **standalo
 - The device only sends a telemetry update when a **valid GPS fix** is available.
 - Updates are triggered by **time interval** and/or **minimum distance moved** since the last send (Haversine formula).
 - When autonomous mode is active, **incoming chat and channel messages are silently dropped** — the node acts as a tracker only, not a chat device.
-- The splash screen and home screen both display **"Team Edition"** and an **"AUTONOMOUS"** status indicator when the mode is active.
+- The splash screen displays **"Team Edition"** branding; the home screen shows an **"AUTONOMOUS"** status indicator in place of the message count when the mode is active.
 - Message preview screens are suppressed in autonomous mode.
 
 **Telemetry payload (`#TEL:` format):**  
@@ -90,11 +94,21 @@ When the device's advertised name is changed via `CMD_SET_ADVERT_NAME`, a hardwa
 
 ---
 
-#### 💾 Backward-Compatible Preferences Storage
+#### 💾 Preferences Storage
 
-New Team Edition preferences (`flood_max`, `autonomous_enabled`, `autonomous_channel_hash`, `autonomous_interval_sec`, `autonomous_min_distance_m`) are appended to the existing preferences file using optional reads, maintaining full backward compatibility with devices running older firmware.
+Upstream replaced the old fixed-offset binary prefs blob (`/new_prefs`) with a keyed serialisation to `/prefs.json`, handled by [`ConfigSerializer`](./src/helpers/ConfigSerializer.h). Team Edition preferences are registered as named keys in [`NodePrefs.h`](./examples/companion_radio/NodePrefs.h) so they persist across reboots:
 
-### NOTE: Version 1.15.0.4 Requires MeshCore-TEAM  1.1.0 or higher. No issues should arrise using older version of the app, or older versions but the special firmware functionality will not work.
+| Preference | JSON key |
+|---|---|
+| `flood_max` | `repeat.f_max` |
+| `autonomous_enabled` | `auto.en` |
+| `autonomous_channel_hash` | `auto.chan` |
+| `autonomous_interval_sec` | `auto.int` |
+| `autonomous_min_distance_m` | `auto.dist` |
+
+`DataStore::loadPrefsInt()` remains only as a one-time migration reader for the legacy binary file. Because the Team Edition fields were previously written at fork-specific byte offsets, they are **not** carried across that migration — on the first boot after upgrading from an older Team Edition build, `flood_max` and the autonomous settings reset to their defaults once, then persist normally from then on. Note that `flood_max` defaults to `0`, which disables forwarding until the app sends `CMD_SET_MAX_HOPS`.
+
+### NOTE: Requires MeshCore-TEAM 1.1.0 or higher. No issues should arise using older versions of the app, but the special firmware functionality will not work.
 
 ## 🎯 What Can You Use MeshCore For?
 
