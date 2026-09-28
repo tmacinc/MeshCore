@@ -496,11 +496,16 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
 }
 
 bool MyMesh::extractSenderNameFromGroupPayload(const mesh::Packet* packet, char* sender_name, size_t max_len) {
-  if (!packet || !sender_name || max_len < 2 || packet->payload_len <= 6) return false;
+  if (!packet || !sender_name || max_len < 2) return false;
 
-  // Group text payload format starts at payload[5], usually: "SenderName: message"
-  const uint8_t* text_data = &packet->payload[5];
-  size_t text_len = packet->payload_len - 5;
+  // The sender name is only inside the encrypted body:
+  // [timestamp(4)][txt_type(1)]["SenderName: message"]
+  uint8_t data[MAX_PACKET_PAYLOAD];
+  const int len = decryptChannelPacket(packet, data);
+  if (len <= 5) return false;
+
+  const uint8_t* text_data = &data[5];
+  size_t text_len = len - 5;
   size_t out_idx = 0;
 
   for (size_t i = 0; i < text_len && out_idx < max_len - 1; i++) {
@@ -539,6 +544,63 @@ bool MyMesh::isInForwardList(const uint8_t* pub_key_prefix) const {
     }
   }
   return false;
+}
+
+// Group payload is [channel_hash][MAC][encrypted...]. The 1-byte hash can collide with
+// other people's channels, so the MAC must also verify against a channel key on this radio.
+// Decrypts into data (MAX_PACKET_PAYLOAD bytes); returns its length, or 0 if no channel here matches.
+int MyMesh::decryptChannelPacket(const mesh::Packet* packet, uint8_t* data) {
+  if (packet->payload_len <= 1 + CIPHER_MAC_SIZE) return 0;
+
+  const uint8_t* mac_and_data = &packet->payload[1];
+  const int mac_and_data_len = packet->payload_len - 1;
+
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails ch;
+    // Empty slots have no name; skip them so their zeroed hash/key can't match.
+    if (getChannel(i, ch) && ch.name[0] != 0 && ch.channel.hash[0] == packet->payload[0]) {
+      int len = mesh::Utils::MACThenDecrypt(ch.channel.secret, data, mac_and_data, mac_and_data_len);
+      if (len > 0) return len;
+    }
+  }
+  return 0;
+}
+
+// Forwarding scope: only relay traffic that belongs to this radio's channels and contacts.
+bool MyMesh::isOwnTraffic(const mesh::Packet* packet) {
+  switch (packet->getPayloadType()) {
+    case PAYLOAD_TYPE_GRP_TXT:
+    case PAYLOAD_TYPE_GRP_DATA: {
+      // channel must be on this radio (hash and MAC both checked)
+      uint8_t data[MAX_PACKET_PAYLOAD];
+      return decryptChannelPacket(packet, data) > 0;
+    }
+
+    case PAYLOAD_TYPE_TXT_MSG:
+    case PAYLOAD_TYPE_REQ:
+    case PAYLOAD_TYPE_RESPONSE:
+    case PAYLOAD_TYPE_PATH:
+      // [dest_hash][src_hash][MAC][encrypted...]: both ends must be contacts on this radio
+      return packet->payload_len >= 2 &&
+             lookupContactByPubKey(&packet->payload[0], PATH_HASH_SIZE) != NULL &&
+             lookupContactByPubKey(&packet->payload[1], PATH_HASH_SIZE) != NULL;
+
+    case PAYLOAD_TYPE_ADVERT:
+      // [pub_key][timestamp][signature][app_data]: advertiser must be a contact on this radio
+      return packet->payload_len >= PUB_KEY_SIZE &&
+             lookupContactByPubKey(packet->payload, PUB_KEY_SIZE) != NULL;
+
+    case PAYLOAD_TYPE_ACK:    // carries no identity; needed so DM delivery is confirmed
+    case PAYLOAD_TYPE_TRACE:  // only reaches here when explicitly routed through this radio
+      return true;
+
+    case PAYLOAD_TYPE_MULTIPART:
+      // [remaining:4|type:4][...]: only multipart ACKs (extra ACK copies sent when multi_acks is on)
+      return packet->payload_len > 0 && (packet->payload[0] & 0x0F) == PAYLOAD_TYPE_ACK;
+
+    default:                  // e.g. ANON_REQ (logins to other people's repeaters / rooms)
+      return false;
+  }
 }
 
 bool MyMesh::hasValidGpsFix() const {
@@ -698,27 +760,41 @@ void MyMesh::runAutonomousMode() {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
-  // Adaptive forwarding control for companion radios
-  // Respects flood_max set by app via CMD_SET_MAX_HOPS (default 0 = disabled)
+  // Forwarding control for companion radios. Either mode enables forwarding:
+  //  - stock client repeat: repeat byte in CMD_SET_RADIO_PARAMS (allowed repeat frequencies only).
+  //    Behaves exactly as stock: everything is forwarded and TEAM policy is ignored.
+  //  - TEAM smart forwarding: flood_max > 0, set by app via CMD_SET_MAX_HOPS (any frequency).
+  //    Filtered to this radio's own traffic, public channel blocked, hop limit applied.
+  // Default for a companion is neither (flood_max = 0, repeat off) = no forwarding.
+  if (_prefs.isRepeatEn()) {
+    return true;
+  }
+
   updateForwardListPolicyState();
 
   if (forwarding_hard_disabled) {
     MESH_DEBUG_PRINTLN("FORWARD: Blocked - hard disabled by stale whitelist policy");
     return false;
   }
-  
+
   if (_prefs.flood_max == 0) {
-    MESH_DEBUG_PRINTLN("FORWARD: Blocked - forwarding disabled (flood_max=0)");
+    MESH_DEBUG_PRINTLN("FORWARD: Blocked - forwarding disabled (flood_max=0, repeat off)");
     return false;  // Forwarding disabled
   }
-  
-  // Honor hop limit from app
-  if (packet->isRouteFlood() && packet->path_len >= _prefs.flood_max) {
-    MESH_DEBUG_PRINTLN("FORWARD: Blocked - hop limit reached (path_len=%d >= flood_max=%d)", 
-                       (uint32_t)packet->path_len, (uint32_t)_prefs.flood_max);
+
+  // Honor hop limit from app (hop count only; path_len also encodes the path hash size)
+  if (packet->isRouteFlood() && packet->getPathHashCount() >= _prefs.flood_max) {
+    MESH_DEBUG_PRINTLN("FORWARD: Blocked - hop limit reached (hops=%d >= flood_max=%d)",
+                       (uint32_t)packet->getPathHashCount(), (uint32_t)_prefs.flood_max);
     return false;
   }
-  
+
+  if (!isOwnTraffic(packet)) {
+    MESH_DEBUG_PRINTLN("FORWARD: Blocked - not this radio's channels/contacts (type=%d)",
+                       (uint32_t)packet->getPayloadType());
+    return false;
+  }
+
   // Block public channel forwarding to prevent spam
   uint8_t payload_type = packet->getPayloadType();
   if (payload_type == PAYLOAD_TYPE_GRP_TXT || payload_type == PAYLOAD_TYPE_GRP_DATA) {
@@ -749,14 +825,14 @@ bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
     }
   }
   
-  // Allow forwarding for:
-  // - Direct messages (PAYLOAD_TYPE_TXT_MSG)
-  // - Private channel messages (GRP_TXT/GRP_DATA on non-public channels)
-  // - Telemetry and other packet types (ADVERT, ACK, etc.)
-  MESH_DEBUG_PRINTLN("FORWARD: ALLOWED - type=%d, path_len=%d, flood_max=%d", 
-                     (uint32_t)payload_type, (uint32_t)packet->path_len, (uint32_t)_prefs.flood_max);
-  //return true;
-  return _prefs.isRepeatEn();
+  // Allow forwarding for (see isOwnTraffic):
+  // - Messages on non-public channels this radio holds (GRP_TXT/GRP_DATA)
+  // - DMs, requests, responses and path returns between contacts on this radio
+  // - Adverts from contacts on this radio, ACKs (incl. multipart), and traces routed through this radio
+  MESH_DEBUG_PRINTLN("FORWARD: ALLOWED - type=%d, hops=%d, flood_max=%d",
+                     (uint32_t)payload_type, (uint32_t)packet->getPathHashCount(),
+                     (uint32_t)_prefs.flood_max);
+  return true;
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis) {

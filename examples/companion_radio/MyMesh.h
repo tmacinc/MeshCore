@@ -16,7 +16,7 @@
 #endif
 
 // TEAM build number appended to base firmware version (increment each release).
-#define TEAM_VERSION "4"
+#define TEAM_VERSION "5"
 // e.g. "v1.13.0.1"
 #define TEAM_FIRMWARE_VERSION FIRMWARE_VERSION "." TEAM_VERSION
 
@@ -214,6 +214,8 @@ private:
   bool extractSenderNameFromGroupPayload(const mesh::Packet* packet, char* sender_name, size_t max_len);
   bool lookupContactPrefixByName(const char* sender_name, uint8_t out_pub_key_prefix[6]);
   bool isInForwardList(const uint8_t* pub_key_prefix) const;
+  int decryptChannelPacket(const mesh::Packet* packet, uint8_t* data);
+  bool isOwnTraffic(const mesh::Packet* packet);
   bool hasValidGpsFix() const;
   void updateForwardListPolicyState();
   bool shouldSendAutonomousUpdate();

@@ -22,7 +22,7 @@ MeshCore provides the ability to create wireless mesh networks, similar to Mesht
 
 ## 🏷️ Team Edition
 
-This branch (`main`) is the **MeshCore Team Edition** — a custom firmware build layered on top of stock MeshCore. It adds team-oriented features for GPS tracking, smart forwarding control, and unattended autonomous operation. The firmware version is the upstream version suffixed with a Team build number — currently `v1.17.1.4` (`FIRMWARE_VERSION` + `TEAM_VERSION`, both in [`MyMesh.h`](./examples/companion_radio/MyMesh.h)).
+This branch (`main`) is the **MeshCore Team Edition** — a custom firmware build layered on top of stock MeshCore. It adds team-oriented features for GPS tracking, smart forwarding control, and unattended autonomous operation. The firmware version is the upstream version suffixed with a Team build number — currently `v1.17.1.5` (`FIRMWARE_VERSION` + `TEAM_VERSION`, both in [`MyMesh.h`](./examples/companion_radio/MyMesh.h)).
 
 ### ✨ Team Edition Features
 
@@ -32,14 +32,19 @@ The companion radio firmware can now have its forwarding behaviour controlled dy
 
 | Command | Code | Description |
 |---|---|---|
-| `CMD_SET_MAX_HOPS` | `201` | Set the maximum flood hop count (`flood_max`). `0` disables forwarding. |
+| `CMD_SET_MAX_HOPS` | `201` | Set the maximum flood hop count (`flood_max`). Any value above `0` enables smart forwarding on any frequency; `0` disables it. |
 | `CMD_SET_FORWARD_LIST` | `202` | Push a whitelist of up to 20 contact public-key prefixes (6 bytes each). Only messages from these contacts are forwarded. |
 
 > All Team Edition protocol constants live in [`team_protocol.h`](./examples/companion_radio/team_protocol.h) and use the `200-254` range so they never collide with upstream stock codes (currently maxing out at `CMD 65` / `RESP 28` / `PUSH 0x90`).
 
 **Forwarding policy rules:**
+- Forwarding is on when **either** stock client repeat (repeat byte in `CMD_SET_RADIO_PARAMS`, allowed repeat frequencies only) **or** smart forwarding (`flood_max > 0`, any frequency) is enabled. A companion defaults to neither.
+- **Stock client repeat behaves exactly like stock**: everything is forwarded and the Team rules below do not apply.
+- The rules below apply to smart forwarding only.
+- Flood packets that have already taken `flood_max` hops are not forwarded.
+- Only this radio's own traffic is forwarded: messages on channels the radio holds (verified against the channel key); DMs, requests, responses and path returns between contacts on the radio; adverts from contacts on the radio; ACKs (including multipart ACKs); and traces routed through it. Other people's channels, DMs, adverts and logins are not forwarded.
 - **Public channel messages are always blocked** from being forwarded, preventing channel spam.
-- When a **whitelist** is active, only group messages from contacts in the list are forwarded.
+- When a **whitelist** is active, channel text messages are matched to a contact by the sender name inside the decrypted message; messages from contacts not in the list are not forwarded. Senders whose name doesn't match any contact are still forwarded.
 - The whitelist **expires after 10 minutes** of no policy update, reverting to `flood_max`-only behaviour.
 - If no policy update is received for **60 minutes**, forwarding is **hard-disabled** until the app reconnects and refreshes the policy.
 - The `flood_max` value is persisted to flash, so forwarding behaviour is restored after reboots.
