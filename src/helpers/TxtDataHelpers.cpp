@@ -27,8 +27,13 @@ bool StrHelper::isBlank(const char* str) {
 }
 
 #include <Arduino.h>
+#include <stdio.h>
+#if __has_include(<api/itoa.h>)
+// https://github.com/stm32duino/Arduino_Core_STM32/issues/3084
+#include <api/itoa.h>
+#endif
 
-union int32_Float_t 
+union int32_Float_t
 {
   int32_t Long;
   float Float;
